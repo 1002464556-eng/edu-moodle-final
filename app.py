@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# הגדרת דף בסיסית
 st.set_page_config(page_title="דשבורד משימות מודל - מחוז ירושלים", layout="wide", page_icon="🏆")
 
-# פונקציית עזר לקריאת קבצים (מנסה כמה קידודים)
 def safe_read_csv(filename):
     encodings = ['utf-8-sig', 'cp1255', 'iso-8859-8']
     for enc in encodings:
@@ -13,187 +11,133 @@ def safe_read_csv(filename):
             return pd.read_csv(filename, encoding=enc)
         except Exception:
             continue
-    st.error(f"לא הצלחתי לקרוא את הקובץ {filename}. ודאי שזה קובץ CSV תקין.")
     return pd.DataFrame()
 
-# טעינת נתונים ועיבוד גלובלי (לא תלוי במיקום עמודות)
 @st.cache_data
 def load_and_process_data():
-    # 1. טעינת קובץ ההחרגות (לפי סמל מוסד)
+    # 1. טעינת קובץ ההחרגות
     excluded_df = safe_read_csv('מוסדות_להחרגה.csv')
-    if not excluded_df.empty and 'סמל מוסד' in excluded_df.columns:
-        excluded_ids = excluded_df['סמל מוסד'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().tolist()
+    if not excluded_df.empty and len(excluded_df.columns) > 0:
+        col_ex = 'סמל מוסד' if 'סמל מוסד' in excluded_df.columns else excluded_df.columns[0]
+        excluded_ids = excluded_df[col_ex].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().tolist()
     else:
         excluded_ids = []
 
-    # 2. פונקציית עיבוד לקבצי המודל (מתמטיקה/מדעים)
+    # 2. עיבוד קבצי המודל - חילוץ סמל המוסד מתוך עמודת "מוסד"
     def process_moodle_file(filename, domain):
         df = safe_read_csv(filename)
         if df.empty: return df
         
-        # ניקוי בסיסי
-        df = df.iloc[1:].reset_index(drop=True) # מחיקת שורה 2 המיותרת
-        df.columns = df.columns.str.strip() # ניקוי רווחים משמות העמודות
+        df = df.iloc[1:].reset_index(drop=True)
+        df.columns = df.columns.str.strip()
         
-        # איתור עמודות קריטיות לפי שם (לא לפי מיקום)
-        try:
-            col_id = next(c for c in df.columns if 'סמל מוסד' in c)
-            col_school = next(c for c in df.columns if 'מוסד' in c and 'סמל' not in c)
-            col_district = next(c for c in df.columns if 'מחוז תקשוב' in c)
-            col_supervisor = next(c for c in df.columns if 'שם מפקח' in c)
-            col_avg = next(c for c in df.columns if 'ממוצע משימות לתלמיד' in c)
-        except StopIteration:
-            st.error(f"בקובץ {filename} חסרות עמודות קריטיות (כמו סמל מוסד או ממוצע משימות).")
+        if 'מוסד' in df.columns:
+            # התיקון הקריטי: שולף את המספר שלפני המקף!
+            df['סמל מוסד'] = df['מוסד'].astype(str).str.split('-').str[0].str.strip()
+        else:
             return pd.DataFrame()
-
-        # הפיכת עמודת ממוצע למספר
-        df[col_avg] = pd.to_numeric(df[col_avg], errors='coerce').fillna(0).round(2)
+            
+        col_district = 'מחוז תקשוב' if 'מחוז תקשוב' in df.columns else df.columns[2]
+        col_supervisor = 'שם מפקח' if 'שם מפקח' in df.columns else df.columns[4]
+        col_avg = 'ממוצע משימות לתלמיד' if 'ממוצע משימות לתלמיד' in df.columns else df.columns[10]
         
-        # הוספת עמודת תחום (מתמטיקה/מדעים)
+        df['ממוצע משימות'] = pd.to_numeric(df[col_avg], errors='coerce').fillna(0).round(2)
         df['תחום'] = domain
         
-        # שינוי שמות העמודות לשמות קבועים לטובת הדשבורד
-        df = df.rename(columns={
-            col_id: 'סמל מוסד',
-            col_school: 'מוסד',
-            col_district: 'מחוז תקשוב',
-            col_supervisor: 'שם מפקח',
-            col_avg: 'ממוצע משימות'
-        })
-        
-        # סינון החרגות לפי סמל מוסד
-        df['סמל מוסד_לסינון'] = df['סמל מוסד'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df = df[~df['סמל מוסד_לסינון'].isin(excluded_ids)]
-        df = df.drop(columns=['סמל מוסד_לסינון'])
-            
+        df = df.rename(columns={col_district: 'מחוז תקשוב', col_supervisor: 'שם מפקח'})
+        df = df[~df['סמל מוסד'].isin(excluded_ids)]
         return df
 
-    # 3. הפעלת הרובוט על הקבצים
     df_math = process_moodle_file('מתמטיקה מודל.csv', 'מתמטיקה')
     df_sci = process_moodle_file('מדעים מודל.csv', 'מדעים')
     
-    # חיבור הקבצים
     frames = [df for df in [df_math, df_sci] if not df.empty]
     df1 = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     
-    # 4. טיפול בקובץ "ללא קורסים"
-    # הערה: הקובץ המקורי הוא XLSX, אז אנחנו משתמשים בפונקציה אחרת
+    # 3. קובץ ללא קורסים
     try:
         df2 = pd.read_excel('ללא קורסים.csv.xlsx', engine='openpyxl')
-    except Exception:
-        # ניסיון אחרון למקרה שזה בכל זאת CSV
+    except:
         df2 = safe_read_csv('ללא קורסים.csv.xlsx')
-
+            
     if not df2.empty:
-        # ניקוי בסיסי של עמודות
         df2.columns = df2.columns.str.strip()
+        if 'מוסד' in df2.columns:
+            df2['סמל מוסד'] = df2['מוסד'].astype(str).str.split('-').str[0].str.strip()
+            df2 = df2[~df2['סמל מוסד'].isin(excluded_ids)]
+            
+        col_district2 = 'מחוז' if 'מחוז' in df2.columns else ('מחוז תקשוב' if 'מחוז תקשוב' in df2.columns else '')
+        col_supervisor2 = 'מפקח' if 'מפקח' in df2.columns else ('שם מפקח' if 'שם מפקח' in df2.columns else '')
         
-        # איתור עמודות קריטיות ב"ללא קורסים"
-        try:
-            col_id2 = next(c for c in df2.columns if 'סמל מוסד' in c)
-            col_school2 = next(c for c in df2.columns if 'מוסד' in c and 'סמל' not in c)
-            col_district2 = next(c for c in df2.columns if 'מחוז תקשוב' in c)
-            col_supervisor2 = next(c for c in df2.columns if 'מפקח' in c and 'שם' not in c)
-        except StopIteration:
-            df2 = pd.DataFrame() # אם אין עמודות קריטיות, נתייחס לזה כקובץ ריק
+        if col_district2: df2 = df2.rename(columns={col_district2: 'מחוז תקשוב'})
+        if col_supervisor2: df2 = df2.rename(columns={col_supervisor2: 'שם מפקח'})
         
-        if not df2.empty:
-            # שינוי שמות לעמודות קבועות
-            df2 = df2.rename(columns={
-                col_id2: 'סמל מוסד',
-                col_school2: 'מוסד',
-                col_district2: 'מחוז תקשוב',
-                col_supervisor2: 'שם מפקח'
-            })
-            
-            # מחיקת מוחרגים מקובץ ללא קורסים
-            df2['סמל מוסד_לסינון'] = df2['סמל מוסד'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-            df2 = df2[~df2['סמל מוסד_לסינון'].isin(excluded_ids)]
-            df2 = df2.drop(columns=['סמל מוסד_לסינון'])
-            
-            # הערה אסטרטגית: בקובץ שקיבלתי אין עמודת "תחום".
-            # כדי שהדשבורד יעבוד, אנחנו "מניחים" שכל בתי הספר האלה הם ללא קורסים במתמטיקה (למשל).
-            df2['תחום'] = 'כללי'
-            
-            # ניקוי רווחים משמות מפקחים ומחוזות
-            for col in ['מחוז תקשוב', 'שם מפקח']:
-                if col in df2.columns: df2[col] = df2[col].astype(str).str.strip()
-                
+        df2['תחום'] = 'כללי'
+        
     return df1, df2
 
 df1, df2 = load_and_process_data()
 
-# כותרת ראשית ותת-כותרת אסטרטגית
 st.title("🏆 דשבורד משימות מודל - מחוז ירושלים")
 st.markdown("### 🎯 יעד לחודש מרץ: 95% ביצוע | 17 משימות במתמטיקה | 8 משימות במדעים")
 st.divider()
 
-# בחירת מחוז בצד
-st.sidebar.header("הגדרות תצוגה")
-if not df1.empty:
-    district_list = df1['מחוז תקשוב'].dropna().unique().tolist()
-    district = st.sidebar.selectbox("בחר/י מחוז למיקוד:", district_list)
-else:
-    district = ""
-
-if not district:
-    st.warning("הנתונים חסרים או לא נטענו כראוי. אנא בדקי את השגיאות ב-GitHub.")
+if df1.empty:
+    st.error("הנתונים מקבצי מתמטיקה/מדעים עדיין לא נטענו. אנא ודאי שהם ב-GitHub.")
     st.stop()
 
-# סינון לפי מחוז
-df1_dist = df1[df1['מחוז תקשוב'] == district]
-df2_dist = df2[df2['מחוז תקשוב'] == district] if not df2.empty else pd.DataFrame()
+district_list = [d for d in df1['מחוז תקשוב'].dropna().unique() if str(d).strip() != '']
+district = st.sidebar.selectbox("בחר/י מחוז למיקוד:", district_list) if district_list else ""
 
-# 📌 תמונת מצב מחוזית
+if not district:
+    st.stop()
+
+df1_dist = df1[df1['מחוז תקשוב'] == district]
+df2_dist = df2[df2['מחוז תקשוב'] == district] if not df2.empty and 'מחוז תקשוב' in df2.columns else pd.DataFrame()
+
 st.header(f"📌 תמונת מצב - מחוז {district}")
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("📐 מתמטיקה")
     math_avg = df1_dist[df1_dist['תחום'] == 'מתמטיקה']['ממוצע משימות'].mean()
-    st.metric("ממוצע משימות לשכבה", f"{math_avg:.1f}")
+    st.metric("ממוצע משימות לשכבה", f"{math_avg:.1f}" if pd.notna(math_avg) else "0.0")
 
 with col2:
     st.subheader("🔬 מדעים")
     sci_avg = df1_dist[df1_dist['תחום'] == 'מדעים']['ממוצע משימות'].mean()
-    st.metric("ממוצע משימות לשכבה", f"{sci_avg:.1f}")
+    st.metric("ממוצע משימות לשכבה", f"{sci_avg:.1f}" if pd.notna(sci_avg) else "0.0")
 
 st.divider()
 
-# 👥 פילוח לפי מפקחים
 st.header("👥 פילוח לפי מפקחים")
 if 'שם מפקח' in df1_dist.columns:
-    supervisors = df1_dist['שם מפקח'].dropna().unique()
-    supervisor = st.selectbox("בחר/י מפקח להצגת נתונים:", supervisors)
+    supervisors = sorted([s for s in df1_dist['שם מפקח'].dropna().unique() if str(s).strip() != ''])
+    supervisor = st.selectbox("בחר/י מפקח להצגת נתונים:", supervisors) if supervisors else ""
 else:
     supervisor = ""
 
 if supervisor:
     df1_sup = df1_dist[df1_dist['שם מפקח'] == supervisor]
     
-    # גרף עמודות השוואתי (מתמטיקה מול מדעים)
     chart_data = df1_sup.groupby('תחום')['ממוצע משימות'].mean().reset_index()
     fig = px.bar(chart_data, x='תחום', y='ממוצע משימות', color='תחום', 
                  title=f"ממוצע משימות תחת המפקח/ת: {supervisor}", text_auto='.1f')
     st.plotly_chart(fig, use_container_width=True)
 
-    # 📋 פירוט מוסדות (Drill-Down)
     st.markdown("### 📋 פירוט מוסדות (שיטת הרמזור)")
     
-    # פונקציית עיצוב צבעונית (רמזור)
     def style_row(row, domain):
         val = row['ממוצע משימות']
         if pd.isna(val): color = ''
-        # חוקי צבעים לפי מתמטיקה (17) ומדעים (8)
         elif domain == 'מתמטיקה':
-            if val < 5: color = 'background-color: #ffcccc; color: black;' # אדום
-            elif val < 12: color = 'background-color: #ffffcc; color: black;' # צהוב
-            else: color = 'background-color: #ccffcc; color: black;' # ירוק
-        else: # מדעים
-            if val < 2: color = 'background-color: #ffcccc; color: black;' # אדום
-            elif val < 6: color = 'background-color: #ffffcc; color: black;' # צהוב
-            else: color = 'background-color: #ccffcc; color: black;' # ירוק
-        
+            if val < 5: color = 'background-color: #ffcccc; color: black;'
+            elif val < 12: color = 'background-color: #ffffcc; color: black;'
+            else: color = 'background-color: #ccffcc; color: black;'
+        else:
+            if val < 2: color = 'background-color: #ffcccc; color: black;'
+            elif val < 6: color = 'background-color: #ffffcc; color: black;'
+            else: color = 'background-color: #ccffcc; color: black;'
         return [color if col in ['מוסד', 'ממוצע משימות'] else '' for col in row.index]
 
     cols_to_show = ['סמל מוסד', 'מוסד', 'ממוצע משימות']
@@ -201,17 +145,17 @@ if supervisor:
     tab1, tab2 = st.tabs(["📐 בתי ספר - מתמטיקה", "🔬 בתי ספר - מדעים"])
     
     with tab1:
-        df_math_sup = df1_sup[df1_sup['תחום'] == 'מתמטיקה'][cols_to_show]
-        st.dataframe(df_math_sup.style.apply(style_row, domain='מתמטיקה', axis=1), use_container_width=True, hide_index=True)
+        df_math_sup = df1_sup[df1_sup['תחום'] == 'מתמטיקה']
+        if not df_math_sup.empty:
+            st.dataframe(df_math_sup[cols_to_show].style.apply(style_row, domain='מתמטיקה', axis=1), use_container_width=True, hide_index=True)
         
     with tab2:
-        df_sci_sup = df1_sup[df1_sup['תחום'] == 'מדעים'][cols_to_show]
-        st.dataframe(df_sci_sup.style.apply(style_row, domain='מדעים', axis=1), use_container_width=True, hide_index=True)
+        df_sci_sup = df1_sup[df1_sup['תחום'] == 'מדעים']
+        if not df_sci_sup.empty:
+            st.dataframe(df_sci_sup[cols_to_show].style.apply(style_row, domain='מדעים', axis=1), use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # 🚨 חסימות ומוקדי התערבות (ללא קורסים)
-    # הערה אסטרטגית: זהו מוקד הכוח של הדוח. כאן המנכ"ל רואה מי לא התחיל לעבוד.
     st.header("🚨 מוקדי התערבות דחופים (בתי ספר ללא קורסים)")
     
     if not df2_dist.empty and 'שם מפקח' in df2_dist.columns:
@@ -219,8 +163,9 @@ if supervisor:
         
         if not df2_sup.empty:
             st.warning(f"המפקח/ת {supervisor} אחראי/ת על {len(df2_sup)} מוסדות שטרם פתחו קורסי מודל.")
-            st.dataframe(df2_sup[['סמל מוסד', 'מוסד']], hide_index=True, use_container_width=True)
+            if 'מוסד' in df2_sup.columns and 'סמל מוסד' in df2_sup.columns:
+                st.dataframe(df2_sup[['סמל מוסד', 'מוסד']], hide_index=True, use_container_width=True)
         else:
             st.success("אין בתי ספר ללא קורסים תחת מפקח זה. עבודה מצוינת!")
     else:
-        st.info("קובץ 'ללא קורסים' חסר או לא תקין. לא ניתן להציג מוקדי התערבות.")
+        st.info("אין נתונים זמינים על בתי ספר ללא קורסים למחוז/מפקח זה.")
